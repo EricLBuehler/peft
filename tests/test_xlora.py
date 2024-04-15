@@ -14,12 +14,12 @@
 
 import os
 
-from peft.peft_model import PeftModel
 import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from peft import LoraConfig, PeftType, TaskType, XLoraConfig, get_peft_model
+from peft.peft_model import PeftModel
 
 
 class TestXlora:
@@ -134,11 +134,11 @@ class TestXlora:
         print(text[0])
 
         model.set_use_trainable_adapters(True)
-        assert model.xlora_config.use_trainable_adapters
+        assert model.peft_config["default"].use_trainable_adapters
 
         model.set_use_trainable_adapters(False)
         model.get_use_trainable_adapters()
-        assert not model.xlora_config.use_trainable_adapters
+        assert not model.peft_config["default"].use_trainable_adapters
 
         assert str(model) is not None
 
