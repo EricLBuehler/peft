@@ -134,8 +134,6 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
             self._peft_config = None
             cls = PEFT_TYPE_TO_MODEL_MAPPING[peft_config.peft_type]
             self.base_model = cls(model, {adapter_name: peft_config}, adapter_name)
-            if isinstance(self.base_model, XLoraModel):
-                self.base_model.post_init_lora(model, peft_config, self)
             self.set_additional_trainable_modules(peft_config, adapter_name)
 
         if getattr(model, "is_gradient_checkpointing", True):
@@ -291,9 +289,6 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
             if is_main_process:
                 peft_config.save_pretrained(output_dir, auto_mapping_dict=auto_mapping_dict)
             peft_config.inference_mode = inference_mode
-
-        if hasattr(self.base_model, "_save_pretrained_hook"):
-            self.base_model._save_pretrained_hook(save_directory, safe_serialization, is_main_process)
 
     @classmethod
     def from_pretrained(
