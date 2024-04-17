@@ -45,27 +45,26 @@ def convert_layers_to_xlora(
     Returns the number of swapped layers.
     """
     total_swapped = 0
-    all_layers = []
 
     device = None
     for module in base.modules():
         if isinstance(module, lora.Linear):
             new_layer = XLoRALinearLayer(module, config, total_swapped)
             device = module.lora_A[next(iter(module.lora_A))].weight.device
-            all_layers.append(new_layer)
+            module.forward = new_layer.forward  # type: ignore[method-assign]
             total_swapped += 1
         elif isinstance(module, lora.Embedding):
             new_layer = XLoRAEmbeddingLayer(module, config, total_swapped)
             device = module.lora_A[next(iter(module.lora_embedding_A))].weight.device
-            all_layers.append(new_layer)
+            module.forward = new_layer.forward  # type: ignore[method-assign]
             total_swapped += 1
         elif isinstance(module, lora.Conv2d):
             new_layer = XLoRAConv2dLayer(module, config, total_swapped)
             device = module.lora_A[next(iter(module.lora_A))].weight.device
-            all_layers.append(new_layer)
+            module.forward = new_layer.forward  # type: ignore[method-assign]
             total_swapped += 1
 
-    return (total_swapped, device, all_layers)
+    return (total_swapped, device)
 
 
 class XLoraModel(BaseTuner):
@@ -121,12 +120,28 @@ class XLoraModel(BaseTuner):
         # a bit hacky but eh
         from peft import PeftModel
 
-        # TODO: probably needs some more work, as some stuff is hard-coded here, subfolders not considered
-        lora_model = PeftModel.from_pretrained(model, config["default"].adapters["0"], adapter_name="0")
-        for key, val in config["default"].adapters.items():
-            if key == "0":
-                continue
-            lora_model.load_adapter(val, key)
+        adapters_items = config["default"].adapters.items()
+        first_item = next(adapters_items)
+        if hasattr(self.config, "_subfolders"):
+            lora_model = PeftModel.from_pretrained(model, first_item[0][1], first_item[0][0], subfolder=first_item[1])
+        else:
+            lora_model = PeftModel.from_pretrained(
+                model,
+                first_item[1],
+                first_item[0],  # type: ignore
+            )
+
+        if hasattr(self.config, "_subfolders"):
+            adapters_items = zip(adapters_items, self.config._subfolders)
+
+        if hasattr(self.config, "_subfolders"):
+            for (adapter_name, model_id), subfolder in adapters_items:
+                lora_model.load_adapter(model_id, adapter_name, subfolder=subfolder)
+        else:
+            for adapter_name, model_id in adapters_items:
+                lora_model.load_adapter(model_id, adapter_name)
+
+        lora_model.set_adapter(list(config["default"].adapters.keys()))
 
         # remove the PeftModel wrapper
         lora_model = lora_model.base_model
@@ -144,9 +159,11 @@ class XLoraModel(BaseTuner):
         if hasattr(model.config, "use_cache") and model.config.use_cache:
             raise ValueError("`use_cache` must be False")
 
-        total_swapped, device, all_layers = convert_layers_to_xlora(self.model, self.config)
+        total_swapped, device = convert_layers_to_xlora(self.model, self.config)
         n_classes = len(self.config.adapters)
         xlora_classifier = XLoraClassifier(self.model, self.config, n_classes, total_swapped, device)
+
+        self._maybe_freeze_all_adapters()
 
         # Setup the model internal state
         self.internal_xlora_classifier = xlora_classifier
@@ -221,19 +238,49 @@ class XLoraModel(BaseTuner):
             state_dict = self.internal_xlora_classifier.state_dict()
             torch.save(state_dict, os.path.join(save_directory, "xlora_classifier.pt"))
 
-    # def forward(self, *args, **kwargs):
-    #     return self.lora_model.model(*args, **kwargs)
+    def _maybe_freeze_all_adapters(self):
+        self.eval()
+        if not self.config.use_trainable_adapters:
+            for name, param in self.named_parameters():
+                if "lora_" in name:
+                    param.requires_grad = False
+
+    def generate(self, *args, **kwargs):
+        res = self.model.generate(*args, **kwargs)  # type: ignore
+        #  This is necessary because we use PeftModel.disable_adapter() which reenables the adapters
+        self._maybe_freeze_all_adapters()
+        return res
 
     @contextmanager
     def _enable_peft_forward_hooks(self, *args, input_ids=None, inputs_embeds=None, **kwargs):
-        # here we need some more precautions to ensure that the LoRA adapters are disabled
-        base_model_outputs = self.model(
-            input_ids=input_ids, inputs_embeds=inputs_embeds, output_hidden_states=True, return_dict=True
-        )
-        xlora_scalings = self.internal_xlora_classifier(
-            base_model_outputs, input_ids=input_ids, inputs_embeds=inputs_embeds
-        )
+        # =========================== Forward pass with "dummy" scalings ==================
+        dummy_scalings = self.internal_xlora_classifier.make_dummy_scalings(*args, **kwargs)
+
+        def hook(module, *args, **kwargs):
+            kwargs["xlora_scalings"] = dummy_scalings
+            return args, kwargs
+
+        handles = []
+
+        for module in self.model.modules():
+            if isinstance(module, XLoRALayer):
+                handle = module.register_forward_pre_hook(hook, with_kwargs=True)
+                handles.append(handle)
+
+        with torch.no_grad():
+            with self.model.disable_adapter():
+                try:
+                    base_output = self.model(
+                        input_ids=input_ids, inputs_embeds=inputs_embeds, output_hidden_states=True, return_dict=True
+                    )
+                finally:
+                    for handle in handles:
+                        handle.remove()
+
+        xlora_scalings = self.internal_xlora_classifier(base_output, input_ids=input_ids, inputs_embeds=inputs_embeds)
         self._internal_xlora_scalings = xlora_scalings
+
+        # =========================== Real forward pass with calculated scalings ==================
 
         def hook(module, *args, **kwargs):
             kwargs["xlora_scalings"] = xlora_scalings
