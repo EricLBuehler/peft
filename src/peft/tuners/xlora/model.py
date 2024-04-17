@@ -50,17 +50,17 @@ def convert_layers_to_xlora(
     device = None
     for module in base.modules():
         if isinstance(module, lora.Linear):
-            new_layer = XLoRALinearLayer(module)
+            new_layer = XLoRALinearLayer(module, config, total_swapped)
             device = module.lora_A[next(iter(module.lora_A))].weight.device
             all_layers.append(new_layer)
             total_swapped += 1
         elif isinstance(module, lora.Embedding):
-            new_layer = XLoRAEmbeddingLayer(module)
+            new_layer = XLoRAEmbeddingLayer(module, config, total_swapped)
             device = module.lora_A[next(iter(module.lora_embedding_A))].weight.device
             all_layers.append(new_layer)
             total_swapped += 1
         elif isinstance(module, lora.Conv2d):
-            new_layer = XLoRAConv2dLayer(module)
+            new_layer = XLoRAConv2dLayer(module, config, total_swapped)
             device = module.lora_A[next(iter(module.lora_A))].weight.device
             all_layers.append(new_layer)
             total_swapped += 1

@@ -17,8 +17,12 @@ class XLoRALayer:
     def __init__(
         self,
         base_layer: lora.LoraLayer,
+        config: XLoraConfig,
+        layer_num: int,
     ) -> None:
         self.base_layer = base_layer
+        self.config = config
+        self.layer_number = layer_num
 
     @staticmethod
     def apply_scalings_to_x(x: torch.Tensor, scalings_layer: torch.Tensor, adapter: int) -> torch.Tensor:
@@ -27,13 +31,35 @@ class XLoRALayer:
         # scalings_layer = [batch_size, seq_len, 1]
         return x * scalings
 
+    def get_maybe_topk_scalings(self, scalings: torch.Tensor) -> torch.Tensor:
+        # xlora_scalings = [batch_size, seq_len, n_classes]
+        xlora_scalings: Tensor = scalings[:, :, self.layer_number, :]  # type: ignore
+
+        if self.config.top_k_lora is not None:
+            _, topk_indices = torch.topk(xlora_scalings, k=self.config.top_k_lora, dim=-1)
+
+            # Mask the topk to True, the rest to False
+            mask = torch.zeros_like(xlora_scalings, dtype=torch.bool)
+            mask.scatter_(-1, topk_indices, True)
+
+            xlora_scalings = xlora_scalings * mask.to(xlora_scalings.dtype)
+
+        if self.config.enable_softmax_topk:
+            nonzero_mask = xlora_scalings != 0
+            softmax_res_nonzero = torch.softmax(xlora_scalings[nonzero_mask], dim=-1)
+            xlora_scalings[nonzero_mask] = softmax_res_nonzero
+
+        return xlora_scalings
+
 
 class XLoRALinearLayer(XLoRALayer):
     def __init__(
         self,
         base_layer: lora.Linear,
+        config: XLoraConfig,
+        layer_num: int,
     ) -> None:
-        super().__init__(base_layer)
+        super().__init__(base_layer, config, layer_num)
 
     def forward(self, x: Tensor, *args: Any, xlora_scalings=None, **kwargs: Any) -> Tensor:
         """
@@ -42,7 +68,7 @@ class XLoRALinearLayer(XLoRALayer):
         """
 
         previous_dtype = x.dtype
-        # xlora_scalings = self.get_maybe_topk_scalings()
+        xlora_scalings = self.get_maybe_topk_scalings()
 
         # Ignore if disabled. We want to make sure this is always run.
         if self.target.merged:
@@ -77,8 +103,9 @@ class XLoRAEmbeddingLayer(XLoRALayer):
         self,
         base_layer: lora.Embedding,
         config: XLoraConfig,
+        layer_num: int,
     ) -> None:
-        super().__init__(base_layer)
+        super().__init__(base_layer, config, layer_num)
 
     def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
         """
@@ -117,8 +144,10 @@ class XLoRAConv2dLayer(XLoRALayer):
     def __init__(
         self,
         base_layer: lora.Conv2d,
+        config: XLoraConfig,
+        layer_num: int,
     ) -> None:
-        super().__init__(base_layer)
+        super().__init__(base_layer, config, layer_num)
 
     def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
         """
