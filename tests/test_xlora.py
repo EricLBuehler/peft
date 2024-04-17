@@ -107,6 +107,7 @@ class TestXlora:
 
         bucketed = model.get_bucketed_scalings_log()
         keys = bucketed.keys()
+        # One bucket for prompt (seqlen=...) and one for the completion (seqlen=1)
         assert len(bucketed) == 2
         # One bucket for prompt (which has 1 elem)
         assert len(bucketed[max(keys)][0]) == 1
@@ -157,7 +158,7 @@ class TestXlora:
 
         model = AutoModelForCausalLM.from_pretrained(self.model_id)
         model.config.use_cache = False
-        model = PeftModel.from_pretrained(model=model, model_id=tmp_dir)
+        model = PeftModel.from_pretrained(model=model, model_id=tmp_dir).to(self.device)
 
         inputs = tokenizer.encode("Python is a", add_special_tokens=False, return_tensors="pt")
         outputs = model.generate(
